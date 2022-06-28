@@ -111,7 +111,8 @@ void semihosting_arg_fallback(const char *file, const char *cmd)
     char *cmd_token;
 
     /* argv[0] */
-    add_semihosting_arg(&semihosting, "arg", file, NULL);
+//    removed it, arg_fallback and standard is behaving different in terms of file name for first arg
+//    add_semihosting_arg(&semihosting, "arg", file, NULL);
 
     /* split -append and initialize argv[1..n] */
     cmd_token = strtok(g_strdup(cmd), " ");

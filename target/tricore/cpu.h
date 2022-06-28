@@ -194,6 +194,10 @@ struct CPUTriCoreState {
     const tricore_def_t *cpu_model;
     void *irq[8];
     struct QEMUTimer *timer; /* Internal timer */
+    uint32_t main_addr_entry;
+    uint32_t main_addr_next;
+    uint32_t main_sp_correction;
+    const char *kernel_filename;
 };
 
 /**

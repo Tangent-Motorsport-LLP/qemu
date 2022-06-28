@@ -34,6 +34,7 @@
 #include "tricore-opcodes.h"
 #include "exec/translator.h"
 #include "exec/log.h"
+#include "elf.h"
 
 /*
  * TCG registers
@@ -9029,94 +9030,212 @@ static bool insn_crosses_page(CPUTriCoreState *env, DisasContext *ctx)
     return !tricore_insn_is_16bit(insn);
 }
 
-
+#define _D(x)
+//#define _D(x) x
 static void tricore_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
 {
-    DisasContext *ctx = container_of(dcbase, DisasContext, base);
-    CPUTriCoreState *env = cpu->env_ptr;
-    uint16_t insn_lo;
-    bool is_16bit;
+	DisasContext *ctx = container_of(dcbase, DisasContext, base);
+	CPUTriCoreState *env = cpu->env_ptr;
+	uint16_t insn_lo;
+	bool is_16bit;
 
-    insn_lo = cpu_lduw_code(env, ctx->base.pc_next);
-    is_16bit = tricore_insn_is_16bit(insn_lo);
-    if (is_16bit) {
-    	ctx->opcode = insn_lo;
-    	ctx->pc_succ_insn = ctx->base.pc_next + 2;
-    	decode_16Bit_opc(ctx);
-    	if (insn_lo==INSNOPCODE_DEBUG16)
-    	{
-    		//TODO has to be done
-    		//if the debug is the first insn of the context everything is
-    		//if a later one (no singlestep mode), terminate the disasscontext
-    		//observed in exit where A14 is update in the prev. instruction
-    		//in virtio this should not be the case becaue is always jumped
-    		//tcg_gen_movi_tl(cpu_monitor, 0xAAAA);
+	if (semihosting_enabled() && !gdb_state())
+	{
+		/* parameter passing via commandline to qemu */
+		/* e.g. --semihosting-config enable=on,arg=xxxx1234,arg=yyyy5678 */
+		if (ctx->base.pc_next==env->main_addr_entry)
+		{
+			_D (fprintf(stderr,"Main(...) reached PC=%8.8x\n",env->main_addr_entry));
+			_D (fprintf(stderr,"Main got %d arguments\n",semihosting_get_argc()));
+			{
+				int i;
+				_D (fprintf(stderr,"arg[%d]=%s\n",0,env->kernel_filename));
+				for (i=0; i<semihosting_get_argc(); i+=1 )
+				{
+					_D (fprintf(stderr,"arg[%d]=%s\n",i+1,semihosting_get_arg(i)));
+				}
+			}
 
-    		/* It is debug16 instruction, the following cases are possible (maybe to be extended)
+			/*
+    	        	mov	%d4,0				# argc = 0
+    	        	sub.a	%sp,8
+    	        	st.w	[%sp]0,%d4
+    	        	st.w	[%sp]4,%d4
+    	        	mov.aa	%a4,%sp				# argv
+
+    	        	call	main				# int retval = main (0, NULL);
+    	        	mov	%d4,%d2
+    	        	lea	%sp,[%sp]8			# remove argv[0]
+    	        	mov.u	%d1,0x900d			# set exit code i(A14) for the simulator to
+    	        	mov	%d15,%d2			# 0x900d if the exit status is 0
+    	        	movh	%d3,0xffff
+    	        	or	%d2,%d2,%d3
+    	        	cmov	%d1,%d15,%d2
+    	        	mov.a	%a14,%d1
+    	        	j	_exit				# _exit (retval);
+			 */
+			/* enlarge sp area by 4bytes for each argv element+ total length of *argv[] incl. zeros at the end
+			 * align it additional sp to 64bit
+			 * update d4,a4 and sp accoringly
+			 * after call reverse the correction on sp
+			 */
+			//    	void cpu_stb_data(CPUArchState *env, abi_ptr addr, uint32_t val)
+			//    	cpu_stl_data(env, ea, env->PCXI);
+			//    	cpu_ldl_data
+			/* extend by one byte */
+			uint32_t sp;
+			uint32_t sp_adder;
+			uint32_t sp_adder_argv;
+			uint32_t sp_adder_params;
+			uint32_t ii,jj;
+			sp_adder=0;
+			sp_adder_argv=0;
+			sp_adder+=(semihosting_get_argc()+1)<<2;
+			sp_adder_params=sp_adder;
+			if (env->kernel_filename!=NULL) sp_adder+=strlen(env->kernel_filename)+1;
+			for (ii=0; ii<semihosting_get_argc();ii+=1)
+			{
+				if (semihosting_get_arg(ii)!=NULL) sp_adder+=strlen(semihosting_get_arg(ii))+1;
+			}
+			sp_adder=(sp_adder+8) & ~0x7; //extend to 64bit alignment
+			_D (fprintf(stderr,"sp=%8.8x a4=%8.8x sp_adder=%8.8x\n",env->gpr_a[10],env->gpr_a[4],sp_adder));
+
+			env->gpr_a[10]=env->gpr_a[10]-sp_adder;
+			env->gpr_a[4]=env->gpr_a[4]-sp_adder;
+			sp=env->gpr_a[10];
+			env->gpr_d[4]=semihosting_get_argc()+1;
+			//fill in the pointer and string
+			if (env->kernel_filename==NULL)
+			{
+				cpu_stl_data(env, sp+sp_adder_argv, 0); //argv
+				sp_adder_argv+=4;
+			}
+			else
+			{
+				cpu_stl_data(env, sp+sp_adder_argv, sp+sp_adder_params);
+				sp_adder_argv+=4;
+				for (ii=0; ii<=strlen(env->kernel_filename); ii+=1)
+				{
+					cpu_stb_data(env, sp+sp_adder_params,env->kernel_filename[ii]);
+					sp_adder_params+=1;
+				}
+			}
+			//fill in *argv
+			for (jj=0; jj<semihosting_get_argc();jj+=1)
+			if ((semihosting_get_arg(jj)==NULL))
+			{
+				cpu_stl_data(env, sp+sp_adder_argv, 0); //argv
+				sp_adder_argv+=4;
+			}
+			else
+			{
+				cpu_stl_data(env, sp+sp_adder_argv, sp+sp_adder_params);
+				sp_adder_argv+=4;
+				for (ii=0; ii<=strlen(semihosting_get_arg(jj)); ii+=1)
+				{
+					cpu_stb_data(env, sp+sp_adder_params,semihosting_get_arg(jj)[ii]);
+					sp_adder_params+=1;
+				}
+			}
+
+			for (ii=0; ii<sp_adder; ii+=4)
+			{
+				_D(fprintf(stderr,"%8.8x %8.8x\n",sp+ii,cpu_ldl_data(env, sp+ii)));
+			}
+
+			env->main_sp_correction=sp_adder;
+			//a11 give the address where main is returnign too
+			env->main_addr_next=env->gpr_a[11];
+		}
+		if (ctx->base.pc_next==env->main_addr_next)
+		{
+			//reverse sp
+			//a4 is anyhow destroyed
+			_D (fprintf(stderr,"After call of Main(...) reached PC=%8.8x\n",env->main_addr_next));
+			env->gpr_a[10]=env->gpr_a[10]+env->main_sp_correction;
+		}
+	}
+
+	insn_lo = cpu_lduw_code(env, ctx->base.pc_next);
+	is_16bit = tricore_insn_is_16bit(insn_lo);
+	if (is_16bit) {
+		ctx->opcode = insn_lo;
+		ctx->pc_succ_insn = ctx->base.pc_next + 2;
+		decode_16Bit_opc(ctx);
+		if (insn_lo==INSNOPCODE_DEBUG16)
+		{
+			//TODO has to be done
+			//if the debug is the first insn of the context everything is
+			//if a later one (no singlestep mode), terminate the disasscontext
+			//observed in exit where A14 is update in the prev. instruction
+			//in virtio this should not be the case becaue is always jumped
+			//tcg_gen_movi_tl(cpu_monitor, 0xAAAA);
+
+			/* It is debug16 instruction, the following cases are possible (maybe to be extended)
              1) if a debugger is not connected take debug as nop
              2) if a debugger is connected do a debug exception, virtio/semihosting can be done by client (hook or remoteprotocoll)
              3) if a debugger is connected handle virtio/semihsoting and generate debug exceptions for other cases
              4) if a debugger is not connected, do virtio/semihosting and exit in other cases
 
-    		 */
-    		uint32_t markerpcm2;
-    		uint32_t markerpcm4;
-    		markerpcm2=cpu_lduw_code(env, ctx->base.pc_next-2);
-    		markerpcm4=cpu_lduw_code(env, ctx->base.pc_next-4);
+			 */
+			uint32_t markerpcm2;
+			uint32_t markerpcm4;
+			markerpcm2=cpu_lduw_code(env, ctx->base.pc_next-2);
+			markerpcm4=cpu_lduw_code(env, ctx->base.pc_next-4);
 
-    		qemu_log_mask(LOG_GUEST_ERROR,"debug16 gdb=%d semihost=%d pc=%8.8x mp2m=%4.4x mp4m=%4.4x\n",semihosting_enabled(),gdb_state(),ctx->base.pc_next,markerpcm2,markerpcm4);
-    		//if the debug16 insn has an exit marker we push in each case an exit exception
-    		if ((markerpcm2 & GCC_VIRTIO_MARKEREXITPCM2_MASK) ==GCC_VIRTIO_MARKEREXITPCM2)
-    		{
-    			//Register A14 contains the return value
-    			//0x900d is considered as 0, else pass as exit argument
-    			//exit markers in trap functions have on identifiers and can generate additional infos
-    			qemu_log_mask(LOG_GUEST_ERROR,"Exit Marker\n");
-    			generate_qemu_excp(ctx, EXCP_EXIT);
-    			ctx->base.is_jmp = DISAS_TOO_MANY;
-    		}
-    		else if (gdb_state())
-    		{
-    			qemu_log_mask(LOG_GUEST_ERROR,"Debug with GDB, no semi\n");
-    			generate_qemu_excp(ctx, EXCP_DEBUG);
-    			ctx->base.is_jmp = DISAS_TOO_MANY;
-    		}
-    		else if (semihosting_enabled())
-    		{
-    			qemu_log_mask(LOG_GUEST_ERROR,"Debug no GDB but with semi\n");
-    			if ((markerpcm2==GCC_VIRTIO_MARKERPCM2) && (markerpcm4==GCC_VIRTIO_MARKERPCM4))
-    			{
-    				//Register D12 contains the id
-    				cpu->halted = 1;
-    				cpu->exception_index = EXCP_SEMIHOST;
-    				cpu_loop_exit(cpu);
-    				ctx->base.is_jmp = DISAS_TOO_MANY;
-    			}
-    		}
-    		else
-    		{
-    			qemu_log_mask(LOG_GUEST_ERROR,"Debug as nop\n");
-    			//do nothing just take it as nop
-    		}
-    	}
-    } else {
-        uint32_t insn_hi = cpu_lduw_code(env, ctx->base.pc_next + 2);
-        ctx->opcode = insn_hi << 16 | insn_lo;
-        ctx->pc_succ_insn = ctx->base.pc_next + 4;
-        decode_32Bit_opc(ctx);
-    }
-    ctx->base.pc_next = ctx->pc_succ_insn;
+			qemu_log_mask(LOG_GUEST_ERROR,"debug16 gdb=%d semihost=%d pc=%8.8x mp2m=%4.4x mp4m=%4.4x\n",semihosting_enabled(),gdb_state(),ctx->base.pc_next,markerpcm2,markerpcm4);
+			//if the debug16 insn has an exit marker we push in each case an exit exception
+			if ((markerpcm2 & GCC_VIRTIO_MARKEREXITPCM2_MASK) ==GCC_VIRTIO_MARKEREXITPCM2)
+			{
+				//Register A14 contains the return value
+				//0x900d is considered as 0, else pass as exit argument
+				//exit markers in trap functions have on identifiers and can generate additional infos
+				qemu_log_mask(LOG_GUEST_ERROR,"Exit Marker\n");
+				generate_qemu_excp(ctx, EXCP_EXIT);
+				ctx->base.is_jmp = DISAS_TOO_MANY;
+			}
+			else if (gdb_state())
+			{
+				qemu_log_mask(LOG_GUEST_ERROR,"Debug with GDB, no semi\n");
+				generate_qemu_excp(ctx, EXCP_DEBUG);
+				ctx->base.is_jmp = DISAS_TOO_MANY;
+			}
+			else if (semihosting_enabled())
+			{
+				qemu_log_mask(LOG_GUEST_ERROR,"Debug no GDB but with semi\n");
+				if ((markerpcm2==GCC_VIRTIO_MARKERPCM2) && (markerpcm4==GCC_VIRTIO_MARKERPCM4))
+				{
+					//Register D12 contains the id
+					cpu->halted = 1;
+					cpu->exception_index = EXCP_SEMIHOST;
+					cpu_loop_exit(cpu);
+					ctx->base.is_jmp = DISAS_TOO_MANY;
+				}
+			}
+			else
+			{
+				qemu_log_mask(LOG_GUEST_ERROR,"Debug as nop\n");
+				//do nothing just take it as nop
+			}
+		}
+	} else {
+		uint32_t insn_hi = cpu_lduw_code(env, ctx->base.pc_next + 2);
+		ctx->opcode = insn_hi << 16 | insn_lo;
+		ctx->pc_succ_insn = ctx->base.pc_next + 4;
+		decode_32Bit_opc(ctx);
+	}
+	ctx->base.pc_next = ctx->pc_succ_insn;
 
-    if (ctx->base.is_jmp == DISAS_NEXT) {
-        target_ulong page_start;
+	if (ctx->base.is_jmp == DISAS_NEXT) {
+		target_ulong page_start;
 
-        page_start = ctx->base.pc_first & TARGET_PAGE_MASK;
-        if (ctx->base.pc_next - page_start >= TARGET_PAGE_SIZE
-            || (ctx->base.pc_next - page_start >= TARGET_PAGE_SIZE - 3
-                && insn_crosses_page(env, ctx))) {
-            ctx->base.is_jmp = DISAS_TOO_MANY;
-        }
-    }
+		page_start = ctx->base.pc_first & TARGET_PAGE_MASK;
+		if (ctx->base.pc_next - page_start >= TARGET_PAGE_SIZE
+				|| (ctx->base.pc_next - page_start >= TARGET_PAGE_SIZE - 3
+						&& insn_crosses_page(env, ctx))) {
+			ctx->base.is_jmp = DISAS_TOO_MANY;
+		}
+	}
 }
 
 static void tricore_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
@@ -9173,6 +9292,9 @@ void cpu_state_reset(CPUTriCoreState *env)
     /* Reset Regs to Default Value */
     env->PSW = 0xb80;
     env->semihost=0;
+    env->main_addr_entry=0;
+    env->main_addr_next=0;
+    env->kernel_filename=NULL;
     fpu_set_state(env);
 }
 

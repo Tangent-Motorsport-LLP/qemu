@@ -22,6 +22,7 @@
 #include "qemu/units.h"
 #include "qapi/error.h"
 #include "cpu.h"
+#include "disas/disas.h"
 #include "net/net.h"
 #include "hw/boards.h"
 #include "hw/loader.h"
@@ -32,6 +33,63 @@
 
 
 /* Board init.  */
+
+/*
+static int symfind(const void *s0, const void *s1)
+{
+    target_ulong addr = *(target_ulong *)s0;
+    struct elf_sym *sym = (struct elf_sym *)s1;
+    int result = 0;
+    if (addr < sym->st_value) {
+        result = -1;
+    } else if (addr >= sym->st_value + sym->st_size) {
+        result = 1;
+    }
+    return result;
+}
+*/
+//static int addrfind(const void *s0, const void *s1)
+//{
+//	const char *symname = (const char *)s0;
+//    struct elf_sym *sym = (struct elf_sym *)s1;
+//    int result = 1;
+//    if (strcmp(s->disas_strtab + sym->st_name,symname)==0) result=0;
+//    return result;
+//}
+
+static uint32_t lookup_addrxx(const char *symbol)
+{
+
+	struct syminfo *s;
+	/* binary search */
+	int i;
+	for (s = syminfos; s; s = s->next)
+	{
+		struct elf32_sym *syms = s->disas_symtab.elf32;
+		for (i=0; i<s->disas_num_syms; i+=1)
+		{
+			if (strcmp(s->disas_strtab + syms[i].st_name,symbol)==0) return syms[i].st_value;
+		}
+	}
+	return 0;
+}
+
+//const char *lookup_symbol(target_ulong orig_addr)
+//{
+//    const char *symbol = "";
+//    struct syminfo *s;
+//
+//    for (s = syminfos; s; s = s->next) {
+//        symbol = s->lookup_symbol(s, orig_addr);
+//        if (symbol[0] != '\0') {
+//            break;
+//        }
+//    }
+//
+//    return symbol;
+//}
+
+
 
 static struct tricore_boot_info tricoretb_binfo;
 
@@ -50,7 +108,8 @@ static void tricore_load_kernel(CPUTriCoreState *env)
         exit(1);
     }
     env->PC = entry;
-
+    env->main_addr_entry=lookup_addrxx("main");
+    env->kernel_filename=tricoretb_binfo.kernel_filename;
 }
 
 static void tricore_testboard_init(MachineState *machine, int board_id)

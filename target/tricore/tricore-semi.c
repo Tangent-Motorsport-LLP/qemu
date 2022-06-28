@@ -575,7 +575,7 @@ static void tricore_vio_read (CPUState *cs)
 			goto done;
 		}
 
-	if (target_write_memory (cs,rem_buf, buf, rlen))
+    if (target_write_memory (cs,rem_buf, buf, rlen))
 	{
 		tricore_vio_set_result (cs,-1, EIO);
 		goto done;
